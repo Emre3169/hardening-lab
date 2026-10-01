@@ -1,0 +1,16 @@
+﻿{
+    "date":  "2026-09-30",
+    "label":  "before",
+    "machine":  "windows-lab",
+    "tool":  "HardeningKitty v.0.9.4 / cis_microsoft_windows_11_enterprise_24h2_machine",
+    "score":  3.28,
+    "stats":  {
+                  "total":  647,
+                  "passed":  164,
+                  "low":  43,
+                  "medium":  440,
+                  "high":  0
+              },
+    "os_build":  "26300.9457",
+    "hotfixes":  4
+}
