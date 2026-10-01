@@ -8,12 +8,14 @@ All commands run from the repo root on the Mac.
 | date | machine | tool | before | after | delta |
 |------|---------|------|--------|-------|-------|
 | 2026-09-30 | ubuntu-lab (Ubuntu 24.04.5 ARM64) | Lynis 3.0.9 | 61 | 78 | +17 |
-| — | windows-lab (Windows 11 ARM64) | HardeningKitty | pending | pending | |
+| 2026-09-30 | windows-lab (Windows 11 Pro ARM64, build 26300.9457) | HardeningKitty v.0.9.4, CIS Win11 24H2 list | 3.28 | 3.47 | +0.19 |
 
 - **Lynis warnings:** 2 → 1. The one left is the security-repo false positive (see Lab
   exceptions).
 - **Lynis suggestions:** 46 → 28.
-- **Raw output:** `scores/lynis-before.txt` and `scores/lynis-after.txt`.
+- **HardeningKitty:** 164 → 199 passed of 647 checks; Low 43 → 32, Medium 440 → 416, High 0.
+- **Raw output:** `scores/lynis-{before,after}.txt` and
+  `scores/hardeningkitty-{before,after}.{csv,log,json}`, plus `scores/hotfix-*.csv`.
 
 ## 1. Prerequisites
 
@@ -132,11 +134,102 @@ utmctl start ubuntu-lab
 The clone has the same MAC address and machine ID as the original, so never run both at
 once.
 
-## 8. Windows
+## 8. Windows (windows-lab)
 
-**Pending.** The approved scope is Services, DefenderFirewall, AuditPolicy and
-AccountPolicy, plus `Get-HotFix` recording (PLAN.md §3). The Windows VM hasn't been created
-yet.
+Run on 2026-09-30 (the VM's local date; 2026-10-01 UTC) on Windows 11 Pro ARM64, build
+26300.9457, with 4 hotfixes. The scope is Services, DefenderFirewall, AuditPolicy and
+AccountPolicy, plus `Get-HotFix` recording (PLAN.md §3).
+
+**Prerequisites**
+- `Host windows-lab` in `.ssh/config`: 192.168.64.3, user `emre`, the lab key. OpenSSH
+  Server with PowerShell as the default shell. The SSH session runs as an elevated admin.
+- The SSH firewall rule must allow 192.168.64.0/24 on every profile. Here it had to be fixed
+  through UTM's guest agent first, because SSH timed out.
+- Verify the host key against `C:\ProgramData\ssh\ssh_host_ed25519_key.pub`:
+  `SHA256:hLPyBrxlozKsu2+mNdtZ4mqvKX5PYUB6trPbEQfqpBc`.
+
+**8.1 Score before**
+```sh
+windows/run-remote.sh windows/score.ps1 before
+```
+On its first run this installs HardeningKitty v.0.9.4 into `C:\hardening-lab\`. It audits
+against `cis_microsoft_windows_11_enterprise_24h2_machine`.
+Result: **3.28**, with 164 passed of 647 (Low 43, Medium 440, High 0).
+
+**8.2 Dry run**
+```sh
+windows/run-remote.sh windows/harden.ps1 -DryRun
+```
+Result: **54 would change, 17 already OK, no errors.**
+
+| Group | Changes | What |
+|-------|--------:|------|
+| Services | 13 | disable XblAuthManager, XblGameSave, XboxNetApiSvc, XboxGipSvc, MapsBroker, lfsvc, SharedAccess, RetailDemo, WMPNetworkSvc, SSDPSrv, upnphost, DiagTrack and Spooler (RemoteRegistry and Fax were already disabled) |
+| DefenderFirewall | 19 | PUA protection 2 → 1 (audit → block), network protection 0 → 1, 14 ASR rules → Audit; all 3 firewall profiles NotConfigured → explicit (inbound Block, outbound Allow, allow rules honoured, blocked connections logged, 16 MB log) |
+| AuditPolicy | 10 | 7 subcategories get missing success/failure auditing (Credential Validation, User Account Management, Process Creation, Account Lockout, Audit Policy Change, Sensitive Privilege Use, Security System Extension); subcategories override legacy categories; command line in event 4688; Security log 20 MB → 1 GB |
+| AccountPolicy | 12 | minimum length 0 → 14, complexity on, history 0 → 24, maximum age 42 → 365, minimum age 0 → 1, lockout 10 → 5 attempts, reset counter and duration 10 → 15 min; WDigest off, LLMNR off, NetBIOS off on 2 interfaces |
+
+Already compliant: real-time protection, cloud protection, sample submission, Guest and
+Administrator disabled, `RunAsPPL`, SMB1 off.
+
+**8.3 Harden, verify SSH, reboot**
+```sh
+windows/run-remote.sh windows/harden.ps1
+ssh -F .ssh/config windows-lab 'hostname; whoami'      # from a fresh connection
+ssh -F .ssh/config windows-lab 'Restart-Computer -Force'
+# poll SSH every 20 s, at most 15 tries, and compare LastBootUpTime before and after
+```
+Result: **54 changed, 0 errors, no Tamper Protection blocks.** The run is saved in
+`C:\hardening-lab\backups\20261001T021903Z\` (manifest and snapshots).
+
+SSH worked straight after hardening. After `Restart-Computer`, SSH came back on the second
+poll, about 40 s, with a new boot time.
+
+The reboot applies services, LSA and other settings that only load at boot. Score after it,
+not before.
+
+**8.4 Score after**
+```sh
+windows/run-remote.sh windows/score.ps1 after       # fills the after column in scores/SCORES.md
+```
+Result: **3.47** (+0.19), with 199 passed of 647 (Low 32, Medium 416, High 0).
+35 checks went from failed to passed. Advanced audit policy now has 0 failures.
+
+**8.5 Firewall: policy store vs local store**
+- HardeningKitty's 18 firewall checks (9.x) still fail with `EnableFirewall=0 (Policy)`,
+  even though the firewall is on with the intended settings.
+- The checks read the **Group Policy store** (`HKLM\SOFTWARE\Policies\Microsoft\WindowsFirewall`).
+  `harden.ps1` uses `Set-NetFirewallProfile`, which writes the **local store**.
+- The effective firewall state is right, but the scanner can't see it.
+- To make these pass, write the same values under the policy key, or with
+  `Set-NetFirewallProfile -PolicyStore localhost`. Either way, check that the SSH rule
+  survives, because policy-store rules and profiles take precedence over local ones.
+
+**8.6 Top 5 remaining findings**
+
+All the remaining failures are Medium or Low. These five are picked for security value.
+
+| # | Finding | Now → CIS | Why it's still open |
+|---|---------|-----------|---------------------|
+| 1 | SMB signing not required (2.3.8.1, 2.3.9.2, 2.3.9.3) | 0 → 1 | Security Options are outside the trimmed scope. It's the best next candidate: it blocks NTLM relay, and it's three registry values. |
+| 2 | Network logon rights too broad (2.2.2 includes Everyone; 2.2.16 only denies Guest) | → Administrators and Remote Desktop Users; deny local accounts | User Rights Assignment is out of scope. Getting it wrong can lock out remote administration, and SSH logs on over the network, so it needs its own careful step. |
+| 3 | Firewall checks fail on the policy store (9.x, 18 checks) | Policy `EnableFirewall=0` → 1 | Not a real gap. The settings are applied in the local store (§8.5). |
+| 4 | 39 service checks (Bluetooth BTAGService and bthserv, GameInput, Computer Browser, …) still Manual | → Disabled | The service list was fixed when PLAN.md was approved. Extending it is easy, but it's a scope change. |
+| 5 | Cached logons 10 → 4 (2.3.7.7); printer drivers not restricted to admins (2.3.4.1) | 10 → 4; 0 → 1 | Security Options are out of scope. Cached logons only matter on a domain-joined machine, and this VM is standalone. |
+
+The largest bucket is about 263 Group Policy checks under Administrative Templates (Windows
+Components and System). Those were deliberately left out of this lab's scope.
+
+**8.7 Rollback**
+```sh
+windows/run-remote.sh windows/rollback.ps1 -DryRun
+windows/run-remote.sh windows/rollback.ps1          # replays manifest.json in reverse
+```
+- **What it restores:** service start types, registry values, Defender preferences and ASR
+  rules (rules it added are removed), the Security log size, and the firewall, audit and
+  security policy snapshots.
+- **When `RunAsPPL` changes apply:** after the next reboot.
+- **Full reset:** clone again from `windows-lab-clean`.
 
 ## Lab exceptions
 
